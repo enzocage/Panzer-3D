@@ -823,13 +823,13 @@ export class Game {
 
         console.log("Firing projectile in direction:", direction);
 
+        // Entferne Zielpunkt sofort
+        this.scene.remove(this.aimingMarker);
+        this.aimingMarker = null;
+
         // Starte Schusssequenz
         this.currentGameState = GAME_STATE.SHOOTING;
         this.fireProjectile(this.selectedTank, direction);
-        
-        // Entferne Zielpunkt
-        this.scene.remove(this.aimingMarker);
-        this.aimingMarker = null;
     }
 
     /**
@@ -907,7 +907,7 @@ export class Game {
             }
         }
         
-        // Prüfe Kollision mit Bäumen
+        // Prüfe Kollisionen mit Bäumen
         for (const tree of this.firTrees) {
             if (this.checkProjectileTreeCollision(projectile, tree)) {
                 this.createExplosion(projectile.position, 0x2E7D32, 0.5);
@@ -915,7 +915,7 @@ export class Game {
             }
         }
         
-        // Prüfe Kollision mit Panzern
+        // Prüfe Kollisionen mit Panzern
         for (const tank of this.tanks) {
             if (tank.mesh.userData.player !== projectile.owner && 
                 this.checkProjectileTankCollision(projectile, tank)) {
@@ -958,18 +958,22 @@ export class Game {
      * Verarbeitet einen Panzertreffer
      */
     handleTankHit(tank, projectile) {
+        // Erstelle Explosion an der Position des Panzers
+        const explosionPosition = tank.mesh.position.clone();
         this.createExplosion(
-            projectile.position,
+            explosionPosition,
             tank.mesh.userData.originalColor,
             1.0
         );
         
-        // Entferne Panzer
-        const tankIndex = this.tanks.indexOf(tank);
-        if (tankIndex > -1) {
-            this.tanks.splice(tankIndex, 1);
-        }
-        this.scene.remove(tank.mesh);
+        // Entferne Panzer nach kurzer Verzögerung
+        setTimeout(() => {
+            const tankIndex = this.tanks.indexOf(tank);
+            if (tankIndex > -1) {
+                this.tanks.splice(tankIndex, 1);
+            }
+            this.scene.remove(tank.mesh);
+        }, 100);
         
         this.soundManager.playExplosion();
         this.checkGameOver();
@@ -1152,20 +1156,123 @@ export class Game {
     }
 
     /**
+     * Prüft Kollisionen während der Panzerbewegung
+     * @param {THREE.Vector3} currentPosition - Aktuelle Position des Panzers
+     * @param {THREE.Vector3} targetPosition - Zielposition des Panzers
+     * @returns {boolean} - true wenn Kollision, false wenn keine Kollision
+     */
+    checkTankMovementCollision(currentPosition, targetPosition) {
+        // Prüfe Spielfeldgrenzen mit kleinerem Abstand
+        const borderMargin = GAME_CONFIG.TANK_BASE_SIZE.width * 0.3;
+        if (Math.abs(targetPosition.x) > GAME_CONFIG.FIELD_WIDTH/2 - borderMargin ||
+            Math.abs(targetPosition.z) > GAME_CONFIG.FIELD_DEPTH/2 - borderMargin) {
+            return true;
+        }
+
+        // Erstelle kleinere Kollisionsbox
+        const destinationBox = new THREE.Box3();
+        const tankBodySize = new THREE.Vector3(
+            GAME_CONFIG.TANK_BASE_SIZE.width * 0.6,  // Reduzierte Breite
+            GAME_CONFIG.TANK_BASE_SIZE.height * 1.5, // Reduzierte Höhe
+            GAME_CONFIG.TANK_BASE_SIZE.depth * 0.6   // Reduzierte Tiefe
+        );
+        
+        destinationBox.setFromCenterAndSize(
+            new THREE.Vector3(
+                targetPosition.x,
+                GAME_CONFIG.TANK_BASE_SIZE.height * 0.75,
+                targetPosition.z
+            ),
+            tankBodySize
+        );
+
+        // Prüfe Kollisionen mit Bergen
+        for (const mountain of this.mountains) {
+            const mountainBox = new THREE.Box3().setFromObject(mountain);
+            if (destinationBox.intersectsBox(mountainBox)) {
+                return true;
+            }
+        }
+
+        // Prüfe Kollisionen mit Bäumen
+        for (const tree of this.firTrees) {
+            const treeBox = new THREE.Box3().setFromObject(tree);
+            if (destinationBox.intersectsBox(treeBox)) {
+                return true;
+            }
+        }
+
+        // Prüfe Kollisionen mit anderen Panzern
+        for (const tank of this.tanks) {
+            if (tank !== this.selectedTank) {
+                const tankBox = new THREE.Box3().setFromObject(tank.mesh);
+                if (destinationBox.intersectsBox(tankBox)) {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Aktualisiert die Panzerposition während der Bewegung
+     * @param {number} deltaTime - Zeit seit dem letzten Frame
+     * @returns {boolean} - true wenn Bewegung abgeschlossen, false wenn noch in Bewegung
+     */
+    updateTankMovement(deltaTime) {
+        if (!this.selectedTank || !this.selectedTank.mesh.userData.moveTarget) {
+            return true;
+        }
+
+        const currentPos = this.selectedTank.mesh.position.clone();
+        const targetPos = this.selectedTank.mesh.userData.moveTarget;
+        const moveSpeed = 10; // Einheiten pro Sekunde
+
+        // Berechne Richtung und Distanz
+        const direction = targetPos.clone().sub(currentPos);
+        const distance = direction.length();
+
+        if (distance < 0.1) {
+            // Bewegung abgeschlossen
+            this.selectedTank.mesh.position.copy(targetPos);
+            this.selectedTank.mesh.userData.isMoving = false;
+            this.soundManager.stopTankEngine();
+            return true;
+        }
+
+        // Berechne nächste Position
+        direction.normalize();
+        const nextPos = currentPos.clone().add(
+            direction.multiplyScalar(moveSpeed * deltaTime)
+        );
+
+        // Prüfe Kollisionen für die nächste Position
+        if (this.checkTankMovementCollision(currentPos, nextPos)) {
+            // Bei Kollision: Bewegung stoppen
+            this.selectedTank.mesh.userData.isMoving = false;
+            this.soundManager.stopTankEngine();
+            return true;
+        }
+
+        // Aktualisiere Position
+        this.selectedTank.mesh.position.copy(nextPos);
+        return false;
+    }
+
+    /**
      * Hauptanimationsschleife
-     * Aktualisiert den Spielzustand und rendert die Szene
      */
     animate() {
         requestAnimationFrame(this.animate.bind(this));
         const deltaTime = this.clock.getDelta();
 
-        // Debug-Ausgabe für Spielzustand
         if (this.currentGameState !== GAME_STATE.GAME_OVER && 
             this.currentGameState !== GAME_STATE.INITIAL) {
             
             // Aktualisiere bewegenden Panzer
             if (this.currentGameState === GAME_STATE.TANK_MOVING && this.selectedTank) {
-                if (this.selectedTank.update(deltaTime)) {
+                if (this.updateTankMovement(deltaTime)) {
                     this.onTankMovementComplete();
                 }
             }
